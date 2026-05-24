@@ -1,0 +1,392 @@
+================================================================================
+  NFT TWITTER BOT — DOCUMENTATION
+  Sistem: NFT Early Account Discovery + Notion Monitor
+================================================================================
+
+OVERVIEW
+--------
+Sistem ini terdiri dari 2 script utama:
+
+  1. nft_sniper.py   — Discovery bot (MAIN)
+                       Monitor recent following CT seed accounts → classify →
+                       NFT CT → main Notion | CT only → reject Notion | lain → skip
+
+  2. run_follow_v2.py — Follow bot (terpisah, jalankan manual)
+                        Follow 1000 seed accounts menggunakan 26 sessions
+                        Rate limit: 14 follow / 15 menit per auth_token
+                        Butuh ~62 jam untuk selesai semua
+
+Script pendukung:
+  frontrun_check.py        — Check smart account frontrun untuk CT list
+  test_sniper_ratelimit.py — Probe rate limit Twitter (sudah dijalankan, jangan diulang)
+  notion_reset.py          — Archive semua entry Notion (gunakan hati-hati)
+
+
+================================================================================
+  FILE STRUCTURE
+================================================================================
+
+NFTtwitterbot/               <- SEMUA ada di sini
+  readhere.txt               <- kamu lagi baca ini
+  nftseed.txt                <- list CT seed accounts
+  requirements.txt           <- pip install -r requirements.txt
+  nft_sniper.py              <- MAIN: recent following monitor + notion updater
+  run_follow_v2.py           <- follow bot (jalankan terpisah, manual)
+  frontrun_check.py          <- frontrun smart account checker untuk CT list
+  test_sniper_ratelimit.py   <- rate limit probe (referensi saja, jangan diulang)
+  notion_reset.py            <- archive semua entry Notion (hati-hati)
+
+  Auto-generated (jangan hapus kecuali mau reset):
+  sniper_state.json          <- state per-seed: known_ids + last_yield + last_fetched
+  sniper_rejected.txt        <- handles yang di-reject (dedup lintas run)
+  sniper_seen.txt            <- handles yang sudah masuk main Notion (dedup)
+  follow_state.json          <- resume state untuk run_follow_v2
+  sniper_live.log            <- log live nft_sniper
+  follow_live.log            <- log live run_follow_v2
+
+Input files (path dikonfigurasi di masing-masing script):
+  C:\Users\ROG\Downloads\Telegram Desktop\Webshare 100 proxies.txt  <- 100 static proxies
+  C:\Users\ROG\Downloads\Telegram Desktop\proxy.txt                 <- rotating proxy fallback
+  LOCAL_SECRET_COOKIE_FILE_1  }
+  LOCAL_SECRET_COOKIE_FILE_2        } cookie sessions
+  LOCAL_SECRET_COOKIE_FILE_3     }
+  LOCAL_SECRET_COOKIE_FILE_4          }
+  C:\Users\ROG\Documents\codex\nftlist_filter\ct_nft.txt           <- seed list tambahan
+
+
+================================================================================
+  REQUIREMENTS
+================================================================================
+
+Python  : 3.10+ (butuh type hint union syntax dict | None)
+Package : requests  (pip install requests)
+          TIDAK butuh anthropic, selenium, playwright, atau apapun lain
+
+Install:
+  pip install -r requirements.txt
+  ATAU
+  pip install requests
+
+
+================================================================================
+  COOKIE SESSION FORMAT
+================================================================================
+
+Setiap file cookie = satu baris per akun Twitter, format:
+  auth_token=<redacted>; ct0=<redacted>; twid=u%3DZZZZ
+
+Field wajib: auth_token, ct0
+Field opsional: twid (untuk identifikasi uid di log)
+
+Cara dapat cookie:
+  1. Login Twitter di browser
+  2. F12 → Application → Cookies → twitter.com
+  3. Copy nilai auth_token dan ct0
+  4. Tulis: auth_token=<redacted>; ct0=<redacted>
+
+Cookie expired → script otomatis skip (status [DEAD])
+Session valid check: GraphQL UserByScreenName (bukan verify_credentials yg deprecated)
+
+
+================================================================================
+  PROXY FORMAT
+================================================================================
+
+Static proxies (Webshare 100 proxies.txt):
+  Format per baris: ip:port:username:password
+  Contoh: 185.199.228.220:7300:user123:pass456
+  Dirotasi round-robin ke setiap session
+
+Rotating proxy (proxy.txt):
+  Format: http://user:pass@host:port
+  Contoh: http://widwmcfk-rotate:ameyg4px7zvk@p.webshare.io:80/
+  Dipakai sebagai fallback jika static proxy tidak ada
+
+
+================================================================================
+  API CREDENTIALS
+================================================================================
+
+Twitter Bearer Token (public, tidak perlu ganti):
+  TWITTER_BEARER_REDACTED
+
+Notion MAIN DB (NFT Early List):
+  Token   : ntn_REDACTED
+  DB ID   : ccb633a6-5089-4982-a158-c479864b72f9
+  DB URL  : notion.so/ccb633a650894982a158c479864b72f9
+
+Notion REJECT DB (Twitter Reject List — CT tapi bukan NFT):
+  Token   : ntn_REDACTED
+  DB ID   : 33e878f48f9880a89558d548026ac91e
+  DB URL  : notion.so/33e878f48f9880a89558d548026ac91e
+
+Frontrun:
+  Token   : FRONTRUN_TOKEN_REDACTED
+  Base URL: https://loadbalance.frontrun.pro
+
+
+================================================================================
+  CARA MENJALANKAN — nft_sniper.py
+================================================================================
+
+1. RUN SEKALI (untuk cron):
+   python nft_sniper.py
+
+2. RUN LOOP (daemon, otomatis setiap 20 menit):
+   python nft_sniper.py --loop
+
+3. RUN LOOP dengan interval custom:
+   python nft_sniper.py --loop --interval 20
+
+4. VPS dengan cron (setiap 20 menit):
+   crontab -e
+   */20 * * * * cd /path/to/NFTtwitterbot && python nft_sniper.py >> sniper_live.log 2>&1
+
+FLOW KERJA (per cycle):
+  a. Load sessions + validasi ALIVE/DEAD
+  b. Load dedup sets: sniper_rejected.txt + sniper_seen.txt
+  c. Load main Notion cache (existing handles)
+  d. Sort seeds berdasarkan last_yield (adaptive rotation)
+  e. Untuk setiap CT seed:
+       - Hitung fetch_count (base atau bonus jika seed aktif)
+       - Ambil N recent following → 1 request saja
+       - Diff dengan state sebelumnya → siapa yang baru di-follow?
+  f. Per akun baru, cek gate berurutan:
+       Gate 1: sudah di Notion / sniper_seen.txt    → SKIP
+       Gate 2: pernah di-reject / sniper_rejected.txt → SKIP
+       Gate 3: classify_account() → routing 3 arah (lihat bawah)
+  g. Update sniper_state.json, sniper_rejected.txt, sniper_seen.txt
+
+
+================================================================================
+  ROUTING 3 ARAH (classify_account)
+================================================================================
+
+Setiap akun baru yang ditemukan diklasifikasikan:
+
+  "nft"         → CT NFT (project, collector, onchain artist)
+                  Syarat: ada 1+ signal NFT spesifik ATAU location = chain name
+                  Tindakan: → main Notion DB + sniper_seen.txt
+                  Contoh bio lolos:
+                    - "NFT collector | pfp holder | opensea verified"
+                    - "111 artworks set to go on chain" + location: ETH
+                    - "Weird little creatures" + location: Ethereum
+                    - "Coming to @ethereum, collaborating with @opensea"
+                    - bio apapun + discord.gg/xxx (NFT project selalu ada discord)
+
+  "ct_only"     → CT tapi bukan NFT (trader, defi, web3 builder, dll)
+                  Syarat: ada crypto/CT signal tapi TIDAK ada NFT signal
+                  Tindakan: → reject Notion DB + sniper_rejected.txt
+                  Contoh bio:
+                    - "crypto trading | defi yield farmer | eth wallet"
+                    - "building in web3 | ethereum developer"
+                    - "degen trader | eth maxi | alpha hunter"
+
+  "hard_reject" → Arabic, airdrop, bio kosong/pendek, followers >1k
+                  Tindakan: → sniper_rejected.txt SAJA (silent, tidak ke Notion)
+
+  "not_ct"      → Sama sekali bukan crypto (job title random, hobi, dll)
+                  Tindakan: → sniper_rejected.txt SAJA (silent, tidak ke Notion)
+                  Contoh bio:
+                    - "Product Manager IT at DL News"
+                    - "weekends feel lighter, mostly PlayStation"
+                    - "10 y/o Certified App & Chatbot Developer"
+
+Signal NFT spesifik (_NFT_SIGNAL):
+  nft, nfts, pfp, mint, minting, holder, hodler, opensea, superrare,
+  foundation, manifold, zora, ordinals, onchain, on chain, on-chain,
+  generative, digital art, crypto art, web3 art, jpeg, collection,
+  collector, discord.gg
+
+Location = chain name (_CHAIN_LOCATION):
+  eth, ethereum, base, solana, sol, btc, bitcoin, polygon, matic,
+  arbitrum, optimism, avalanche, avax, on-chain, on chain, onchain
+
+
+================================================================================
+  ADAPTIVE ROTATION
+================================================================================
+
+  - Seeds diurutkan berdasarkan last_yield (paling produktif duluan tiap cycle)
+  - Seed AKTIF  : yield >= 50% dari fetch_count di cycle sebelumnya
+                  → dapat bonus fetch (FETCH_PER_SEED * FETCH_BONUS_MULTIPLIER = 30)
+  - Seed STALE  : yield < 50%
+                  → tetap dicek, tapi dengan jatah minimum (FETCH_PER_SEED = 15)
+  - BASELINE    : seed pertama kali dicek → pakai base fetch, yield = 0
+  - Semua seed selalu dicek tiap cycle (tidak ada yang di-skip)
+  - State per seed di sniper_state.json: known_ids, last_yield, last_fetched
+
+  Log per seed:
+    @supraEVM            → 7/15 new  yield=47%  [STALE]
+    @0itsali0            → 8/30 new  yield=27%  [ACTIVE]
+    @waleswoosh          → 0/15 baseline         [BASELINE]
+
+
+================================================================================
+  VARIABLE PENTING (di script, bisa diubah)
+================================================================================
+
+  FETCH_PER_SEED         = 15    # berapa recent following per seed (base)
+  FETCH_BONUS_MULTIPLIER = 2     # bonus multiplier untuk seed aktif (15 * 2 = 30)
+  HIGH_YIELD_THRESHOLD   = 0.5   # ratio new/fetched >= ini → seed dianggap aktif
+  INTERVAL_MIN           = 20    # interval loop default (menit)
+  FOLLOWERS_CAP          = 1000  # max followers untuk masuk list (early accounts)
+  FRONTRUN_SLEEP         = 0.5   # jeda antar frontrun API call (detik)
+  NOTION_SLEEP           = 0.35  # jeda antar Notion upsert (detik)
+
+
+================================================================================
+  TIER SCORING (Alpha Score)
+================================================================================
+
+  Smart account (frontrun verified wallet/position) : +40 pts
+  Followers  100–1k                                 : +10
+             < 100                                  : +5
+  NFT keyword di bio                                : +10
+  Account age >= 3 tahun                            : +20
+  Account age >= 1 tahun                            : +10
+
+  Tier A  : score >= 70  (hijau)
+  Tier B  : score >= 40  (kuning)
+  Tier C  : score < 40   (abu-abu)
+
+
+================================================================================
+  NOTION DB — "NFT Early List" (main)
+================================================================================
+
+Field yang diisi otomatis oleh nft_sniper.py:
+
+  Akun            : nama Twitter
+  Link            : https://x.com/handle
+  Follower        : jumlah follower saat crawl
+  Bio             : bio Twitter
+  Tier            : A / B / C (auto-scored)
+  Smart account   : checkbox (dari frontrun)
+  Category        : NFT (fixed)
+  Source Seed     : following:@supraEVM (dari mana akun ini ditemukan)
+  Account Created : tanggal buat akun Twitter (bukan tanggal ditambah ke Notion)
+  Added date      : tanggal pertama kali masuk Notion
+  Last Checked    : tanggal terakhir di-update
+  Alpha Score     : angka raw score
+
+Update behavior:
+  - Akun baru     → CREATE entry lengkap
+  - Akun existing → UPDATE: Last Checked, Tier, Smart account, Follower, Alpha Score
+                    (Added date dan Source Seed tidak berubah)
+
+
+================================================================================
+  NOTION DB — "Twitter Reject List" (reject)
+================================================================================
+
+Diisi otomatis untuk akun ct_only (CT tapi bukan NFT) — untuk manual review.
+Arabic / airdrop / non-CT → TIDAK masuk sini, langsung ke file dedup.
+
+Field:
+  Handle          : @username
+  X Link          : https://x.com/handle
+  Bio             : bio Twitter
+  Followers       : jumlah follower
+  Last Added      : tanggal masuk
+  Source          : following:@seedhandle
+  Reason          : ct_not_nft
+  Account Created : tanggal buat akun Twitter
+
+
+================================================================================
+  RATE LIMITS (EMPIRICALLY CONFIRMED 2026-05-23)
+================================================================================
+
+Twitter friends/list (crawl following):
+  Limit  : 1000 request / 15 menit per auth_token
+  Pakai  : ~20-40 req/session per run (jauh di bawah limit)
+  Guard  : TIDAK PERLU (limit sangat longgar)
+
+Twitter friendships/create (follow — untuk run_follow_v2.py):
+  Limit  : 15 follow / 15 menit per auth_token
+  Guard  : batch 14 per session, tunggu 16 menit antar batch
+  Cron   : minimum 17 menit antar run (risiko suspend jika lebih sering)
+
+Frontrun API:
+  Pacing : 0.5 detik antar request (aman)
+
+Notion API:
+  Max    : ~3 request/detik
+  Pacing : 0.35 detik antar upsert
+
+
+================================================================================
+  CARA DEPLOY DI VPS
+================================================================================
+
+1. Upload semua file dari NFTtwitterbot/ ke VPS
+
+2. Update path di config section nft_sniper.py:
+   COOKIE_FILES       = ["/home/user/cookies/auth1.txt", ...]
+   STATIC_PROXY_FILE  = "/home/user/proxies/webshare.txt"
+   CT_NFT_FILE        = "/home/user/ct_nft.txt"
+   STATE_FILE         = "/home/user/NFTtwitterbot/sniper_state.json"
+   REJECTED_FILE      = "/home/user/NFTtwitterbot/sniper_rejected.txt"
+   SEEN_FILE          = "/home/user/NFTtwitterbot/sniper_seen.txt"
+
+3. Install requirements:
+   pip install requests
+
+4. Test run:
+   python nft_sniper.py
+
+5. Setup cron (setiap 20 menit) ATAU daemon:
+   crontab -e
+   */20 * * * * cd /home/user/NFTtwitterbot && python nft_sniper.py >> sniper_live.log 2>&1
+
+   ATAU jalankan sebagai daemon:
+   screen -S sniper python nft_sniper.py --loop
+   nohup python nft_sniper.py --loop > sniper_live.log 2>&1 &
+
+
+================================================================================
+  TROUBLESHOOTING
+================================================================================
+
+Semua session DEAD:
+  → Cookie expired. Update cookie files dengan auth_token + ct0 baru dari browser.
+  → Pastikan format benar: auth_token=<redacted>; ct0=<redacted> (pisah titik koma)
+
+HTTP 403 pada follow (run_follow_v2.py):
+  → Akun Twitter restricted/baru. Normal untuk beberapa akun dari new auth.txt
+
+friends/list HTTP 200 tapi users kosong:
+  → Akun seed mungkin protected/private
+
+Notion upsert gagal HTTP 400:
+  → Cek format property. Field baru belum ada di DB.
+  → Jalankan notion_reset.py untuk setup ulang schema (HATI-HATI: archive semua entry)
+
+Frontrun API gagal:
+  → Token frontrun expired. Ambil token baru dari browser (cookie frontrun.pro)
+  → Script tetap jalan, smart=False untuk akun yang gagal dicek
+
+Script berhenti di tengah:
+  → sniper_state.json menyimpan state. Jalankan lagi, lanjut otomatis.
+  → Untuk mulai ulang dari awal: hapus sniper_state.json
+
+Notion reject DB gagal:
+  → Cek REJECT_NOTION_TOKEN di config. Token berbeda dari main Notion token.
+
+
+================================================================================
+  CATATAN PENTING
+================================================================================
+
+- nft_sniper.py TIDAK follow siapapun. Murni discovery + Notion update.
+- run_follow_v2.py adalah script follow terpisah — jalankan manual jika perlu.
+- Jangan jalankan run_follow_v2.py lebih dari 1x per 17 menit (risiko suspend).
+- CT accounts lama (diarchive di Notion) bisa di-restore manual dari Notion.
+- Tambah seed baru: edit ct_nft.txt atau BASE_CT_LIST di nft_sniper.py
+- Reject DB hanya untuk ct_only — arabic/airdrop/non-CT tidak masuk sana.
+
+
+================================================================================
+  LAST UPDATED: 2026-05-23
+================================================================================

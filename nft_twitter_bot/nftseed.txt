@@ -1,0 +1,43 @@
+# NFT CT Seed Accounts
+# Format: satu handle per baris, tanpa @
+# Script akan crawl following list semua akun ini untuk discover akun NFT baru
+# Update list ini lalu jalankan nft_sniper.py untuk refresh Notion
+
+# === BASE CT LIST (hardcoded di script, selalu included) ===
+supraEVM
+0itsali0
+jianganti876719
+fly963136
+mahonebtc
+Alraiany2
+Tma_420
+tenacious_ar
+
+# === CT NFT LIST (dari ct_nft.txt, di-merge otomatis) ===
+basedapegang
+KeedsClub
+SloyardNFT
+Surak_Eth
+arcane707
+waleswoosh
+Potterplays1
+LucaNetz
+BR4ted
+SluttyNft
+nftboi
+ToTheDemon
+rodeo_crypto
+xKrisNFT
+CrypSaf
+Trappwurld
+0xValmir
+
+# === TIDAK DITEMUKAN (akun tidak ada / private) ===
+# yourbros    -> NOT FOUND
+# ElenaaETH   -> NOT FOUND
+
+# === CARA TAMBAH SEED BARU ===
+# 1. Tambahkan handle di ct_nft.txt (format: https://x.com/@handle)
+#    ATAU tambah langsung di BASE_CT_LIST di nft_sniper.py
+# 2. Jalankan: python nft_sniper.py
+# 3. Notion akan otomatis ter-update dengan following dari seed baru

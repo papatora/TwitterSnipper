@@ -1,0 +1,26 @@
+# secrets
+.secrets/
+*.env
+.env
+.env.*
+!*env.example
+*auth*.txt
+*cookies*.txt
+*cookies*.json
+*cookie*.json
+*cookie*.txt
+twitter_cookies_pool.json
+proxy.txt
+proxies_static.txt
+*Webshare*proxies*.txt
+
+# runtime/state/logs
+runtime/
+*.log
+sniper_state.json
+sniper_rejected.txt
+sniper_seen.txt
+follow_state.json
+__pycache__/
+*.pyc
+.pytest_cache/
