@@ -23,7 +23,6 @@ Usage:
 """
 
 import argparse
-import os
 import json
 import re
 import time
@@ -39,30 +38,34 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("sniper_live.log", encoding="utf-8"),
     ],
 )
 log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-COOKIE_FILES = [p for p in os.environ.get("NFT_COOKIE_FILES", "").split(":") if p]
-# Example: export NFT_COOKIE_FILES=/path/auth1.txt:/path/auth2.txt
+COOKIE_FILES = [
+    "/root/.openclaw/media/inbound/new_auth_10_lagi---64de1c87-3f8f-47b8-92da-d095f57e5042.txt",
+    "/root/.openclaw/media/inbound/6_chinauth---ef6f9270-646e-41da-8fd7-0df58781f58b.txt",
+    "/root/.openclaw/media/inbound/very_new_auth---fb8490cc-2519-4158-b50d-e26742d67160.txt",
+    "/root/.openclaw/media/inbound/new_auth---27e91386-670e-4a9e-ac1b-c13344c6fcb0.txt",
+    "/root/.openclaw/media/inbound/5_fresh_auth---dec12c02-b9ff-4837-8bb5-1a6a0089a1de.txt",
+]
 STATIC_PROXY_FILE   = "/root/.openclaw/workspace/NFTtwitterbot/NFTtwitterbot/proxies_static.txt"
 ROTATING_PROXY_FILE = "/root/.openclaw/workspace/NFTtwitterbot/NFTtwitterbot/proxy.txt"
 CT_NFT_FILE         = "/root/.openclaw/workspace/NFTtwitterbot/NFTtwitterbot/nftseed.txt"
 STATE_FILE          = "/root/.openclaw/workspace/NFTtwitterbot/NFTtwitterbot/runtime/sniper_state.json"
 
-BEARER = os.environ.get("TWITTER_BEARER", "")
+BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"
 
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+NOTION_TOKEN = "NOTION_NFT_TOKEN"
 NOTION_DB_ID = "ccb633a6-5089-4982-a158-c479864b72f9"
 
 # Reject DB — CT accounts yang tidak lolos NFT gate (untuk manual review)
-REJECT_NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+REJECT_NOTION_TOKEN = "NOTION_REJECT_TOKEN"
 REJECT_NOTION_DB_ID = "33e878f48f9880a89558d548026ac91e"
 
-FRONTRUN_TOKEN = os.environ.get("FRONTRUN_TOKEN", "")
+FRONTRUN_TOKEN = "WbyjEwTz8vQF2WC55ScVHOuHZkVmSkQ0.wiEwzc%2BG4k6z9uVcbp6ymPTtzDidFTBgRvjYFaWMOlM%3D"
 FRONTRUN_BASE  = "https://loadbalance.frontrun.pro"
 
 BASE_CT_LIST = [
@@ -72,11 +75,20 @@ BASE_CT_LIST = [
 
 INTERVAL_MIN           = 20    # default loop interval (menit)
 FETCH_PER_SEED         = 15    # berapa recent following yang diambil per seed per run
-FOLLOWERS_CAP          = 500   # max followers untuk masuk list (early accounts only)
+FOLLOWERS_CAP          = 1000  # max followers untuk masuk list (early accounts only)
 FRONTRUN_SLEEP         = 0.5
 NOTION_SLEEP           = 0.35
 FETCH_BONUS_MULTIPLIER = 2     # bonus fetch multiplier untuk seed aktif
-HIGH_YIELD_THRESHOLD   = 0.5   # ratio new/fetched >= ini → seed dianggap "aktif"
+HIGH_YIELD_THRESHOLD   = 0.15  # ratio new/fetched >= ini → seed dianggap "aktif"
+
+WIB = datetime.timezone(datetime.timedelta(hours=7))
+
+def now_wib_iso() -> str:
+    """Notion date-time string in Indonesia time (UTC+7)."""
+    return datetime.datetime.now(WIB).replace(microsecond=0).isoformat()
+
+def now_wib_label() -> str:
+    return datetime.datetime.now(WIB).strftime("%Y-%m-%d %H:%M WIB")
 
 # File lokal untuk dedup — persistent lintas run
 REJECTED_FILE  = "/root/.openclaw/workspace/NFTtwitterbot/NFTtwitterbot/runtime/sniper_rejected.txt"  # kena filter gate
@@ -278,6 +290,8 @@ _PROJECT_NFT_SIGNAL = {
     "onchain art", "on-chain art", "pfp", "minting", "mint page", "opensea",
     "superrare", "foundation", "manifold", "zora", "ordinals", "discord.gg",
     "coming soon", "launching", "launched", "genesis", "allowlist", "artist collective",
+    "mint soon", "mint live", "hatch", "grow", "built for the early", "on ethereum", "on base", "on solana",
+    "hand-drawn", "hand drawn", "art collection", "pfp collection", "unique", "pieces", "supply",
 }
 
 _INDIVIDUAL_NOISE = {
@@ -294,16 +308,54 @@ def project_nft_signal_score(name: str, bio: str, location: str) -> int:
     score += sum(1 for kw in _PROJECT_NFT_SIGNAL if kw in combined)
     if any(name.lower().replace("_", "").endswith(s) for s in _PROJECT_NAME_SUFFIX):
         score += 1
-    if "discord.gg" in combined or "opensea" in combined or "manifold" in combined or "zora" in combined:
+    if "opensea" in combined or "manifold" in combined or "zora" in combined:
+        score += 1
+    if "discord.gg" in combined and any(t in combined for t in ["nft", "pfp", "collection", "art", "mint"]):
         score += 1
     # Chain location alone is weak, not auto-pass.
     if location in _CHAIN_LOCATION and any(kw in combined for kw in ["nft", "art", "collection", "mint", "pfp", "ordinal"]):
+        score += 1
+    # Supply-shaped phrasing: "10,000 NFTs" / "5,555 unique pieces" / "333 cubs" / "777 collection"
+    if re.search(r"\b\d{2,3}(?:[,.]?\d{3})\b.{0,40}(?:nft|nfts|pfp|piece|pieces|collection|collectibles|cubs|punks|apes|frens|bears|cats|monkeys|robots|girls|boys|warriors|drawn|art|hand-drawn|hand drawn)", combined):
+        score += 2
+    if re.search(r"\bcollection of\s+\d", combined):
+        score += 1
+    if "powered by" in combined and any(t in combined for t in ["solana","ethereum","base","bitcoin","ton","polygon","arbitrum"]) and any(t in combined for t in ["nft","pfp","collection","art"]):
+        score += 1
+    if any(t in combined for t in ["mint calendar", "nft tool", "nft utility", "mint tracker", "calendar that", "nft analytics"]):
+        score += 2
+# NK PFP NFT inject
+    if re.search(r"\b\d{1,2}\s?[Kk]\s+(?:nft|nfts|pfp|collection|piece|pieces|cubs|punks|apes|frens|bears|cats|monkeys|robots|girls|boys|warriors|drawn|art)", combined):
+        score += 2
+    if re.search(r"\b\d{2,3}(?:[,.]?\d{3})?\s+(?:nft|nfts|pfp|piece|pieces|cubs|punks|apes|frens|bears|cats|monkeys|robots|girls|boys|warriors|drawn|art|hand-drawn|hand drawn|collection)", combined):
         score += 1
     return score
 
 def individual_noise_score_nft(name: str, bio: str) -> int:
     combined = (name + " " + bio).lower()
-    return sum(1 for kw in _INDIVIDUAL_NOISE if kw in combined)
+    score = 0
+    for kw in _INDIVIDUAL_NOISE:
+        if " " in kw:
+            if kw in combined:
+                score += 1
+        else:
+            if re.search(r"(?<![a-z0-9_])" + re.escape(kw) + r"(?![a-z0-9_])", combined):
+                score += 1
+    return score
+
+def nft_recheck_candidate(user: dict) -> bool:
+    """Allow previously rejected handles to be reconsidered when they look NFT/project-like.
+    This prevents one bad gate version from permanently burying false positives.
+    """
+    name = (user.get("name") or "").lower()
+    handle = (user.get("screen_name") or user.get("screenName") or "").lower()
+    bio = (user.get("description") or "").lower()
+    loc = (user.get("location") or "").lower()
+    combined = name + " " + handle + " " + bio + " " + loc
+    return (
+        any(t in combined for t in ["nft", "collection", "mint", "mint soon", "pfp", "opensea", "zora", "manifold", "generative", "digital art", "ordinal"])
+        or project_nft_signal_score(handle or name, bio, loc) >= 2
+    )
 
 # Signal CT umum — cukup untuk dimasukkan ke reject Notion (bukan silent reject)
 # CT generic bio: "degen trader", "building in web3", "eth maxi", "crypto native", dll
@@ -357,13 +409,20 @@ def classify_account(user: dict) -> str:
 
     has_ct = any(kw in combined for kw in _CT_SIGNAL)
     has_nft_keyword = any(kw in combined for kw in _NFT_SIGNAL)
+    strong_nft_keyword = any(kw in combined for kw in [
+        "nft", "nfts", "pfp", "opensea", "superrare", "foundation", "manifold", "zora",
+        "nft", "nfts", "pfp", "opensea", "superrare", "foundation", "manifold", "zora",
+        "ordinals", "generative", "digital art", "crypto art", "web3 art", "jpeg", "collection",
+        "mint soon", "minting", "mint page", "onchain art", "on-chain art"
+    ])
     project_score = project_nft_signal_score(handle or name, bio_low, location)
     individual_score = individual_noise_score_nft(name + " " + handle, bio_low)
 
-    # Do NOT let one weak word like collector/holder/mint/onchain/location auto-pass.
-    if has_nft_keyword and project_score >= 2 and individual_score <= 1:
+    # Do NOT let one weak word like holder/collector/onchain/location auto-pass.
+    # Require strong NFT/project-shaped evidence.
+    if strong_nft_keyword and project_score >= 2 and individual_score <= 2:
         return "nft"
-    if has_nft_keyword and project_score >= 3:
+    if project_score >= 4 and has_nft_keyword and individual_score <= 2:
         return "nft"
 
     if has_ct or has_nft_keyword:
@@ -447,13 +506,17 @@ def _reject_notion_headers() -> dict:
     }
 
 
-def upsert_reject_notion(user: dict, source_seed: str, reason: str) -> bool:
-    """Kirim akun CT-tapi-bukan-NFT ke reject Notion DB untuk manual review."""
-    handle    = user["screen_name"]
-    followers = user.get("followers_count", 0)
-    bio       = (user.get("description") or "")[:2000]
-    today     = datetime.date.today().isoformat()
+def upsert_reject_notion(user, source_seed, reason, attempts=2):
+    """Insert reject row into Reject Notion DB; if a row with the same Handle already
+    exists (active or archived), update it in place instead of creating a duplicate.
 
+    Returns True when a row is created OR updated successfully.
+    """
+    handle = user["screen_name"]
+    name = user.get("name") or handle
+    bio = (user.get("description") or "")[:2000]
+    followers = user.get("followers_count", 0)
+    today = now_wib_iso()
     account_created = None
     if user.get("created_at"):
         try:
@@ -461,6 +524,30 @@ def upsert_reject_notion(user: dict, source_seed: str, reason: str) -> bool:
             account_created = dt.strftime("%Y-%m-%d")
         except Exception:
             pass
+
+    # Look up existing row by Handle (case-insensitive contains).
+    page_id = None
+    try:
+        q = {
+            "filter": {"or": [
+                {"property": "Handle", "rich_text": {"equals": handle}},
+                {"property": "Handle", "rich_text": {"contains": handle}},
+            ]},
+            "page_size": 5,
+        }
+        r = requests.post(
+            f"https://api.notion.com/v1/databases/{REJECT_NOTION_DB_ID}/query",
+            headers=_reject_notion_headers(), json=q, timeout=20,
+        )
+        if r.status_code == 200:
+            for row in r.json().get("results", []):
+                rich = (((row.get("properties") or {}).get("Handle") or {}).get("rich_text") or [])
+                txt = "".join(x.get("plain_text", "") for x in rich)
+                if txt.strip().lower() == handle.lower():
+                    page_id = row["id"]
+                    break
+    except Exception as e:
+        log.warning("  [RejectDB] dedupe lookup failed for @%s: %s", handle, e)
 
     props = {
         "Handle":          {"title":     [{"text": {"content": handle}}]},
@@ -476,6 +563,18 @@ def upsert_reject_notion(user: dict, source_seed: str, reason: str) -> bool:
         props["Account Created"] = {"date": {"start": account_created}}
 
     try:
+        if page_id:
+            r = requests.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers=_reject_notion_headers(),
+                json={"archived": False, "properties": props},
+                timeout=20,
+            )
+            if r.status_code == 200:
+                log.info("  [RejectDB-Update] @%-20s  reason=%s", handle, reason)
+                return True
+            log.warning("  [RejectDB-Update] @%s HTTP %d: %s", handle, r.status_code, r.text[:120])
+            return False
         r = requests.post(
             "https://api.notion.com/v1/pages",
             headers=_reject_notion_headers(),
@@ -485,11 +584,10 @@ def upsert_reject_notion(user: dict, source_seed: str, reason: str) -> bool:
         if r.status_code == 200:
             log.info("  [RejectDB] @%-20s  reason=%s", handle, reason)
             return True
-        log.warning("  [RejectDB] @%s HTTP %d: %s", handle, r.status_code, r.text[:100])
+        log.warning("  [RejectDB] @%s HTTP %d: %s", handle, r.status_code, r.text[:120])
     except Exception as e:
         log.error("  [RejectDB] @%s error: %s", handle, e)
     return False
-
 
 def get_existing_handles() -> dict[str, str]:
     existing: dict[str, str] = {}
@@ -520,7 +618,7 @@ def upsert_notion(user: dict, tier: str, score: int, smart: bool,
     name      = user.get("name") or handle
     followers = user.get("followers_count", 0)
     bio       = (user.get("description") or "")[:2000]
-    today     = datetime.date.today().isoformat()
+    today     = now_wib_iso()
 
     account_created = None
     if user.get("created_at"):
@@ -540,6 +638,7 @@ def upsert_notion(user: dict, tier: str, score: int, smart: bool,
             "Alpha Score":   {"number":   score},
             "Smart account": {"checkbox": smart},
             "Follower":      {"number":   followers},
+            "Handle":        {"rich_text": [{"text": {"content": handle}}]},
         }
         call = lambda: requests.patch(
             f"https://api.notion.com/v1/pages/{page_id}",
@@ -549,6 +648,7 @@ def upsert_notion(user: dict, tier: str, score: int, smart: bool,
         verb  = "Created"
         props = {
             "Akun":          {"title":     [{"text": {"content": name}}]},
+            "Handle":        {"rich_text": [{"text": {"content": handle}}]},
             "Link":          {"url":       f"https://x.com/{handle}"},
             "Follower":      {"number":    followers},
             "Bio":           {"rich_text": [{"text": {"content": bio}}] if bio else []},
@@ -621,11 +721,12 @@ def run_cycle(pool: SessionPool, ct_seeds: list[str], state: dict,
     new_rejected: list[str] = []
     new_seen:     list[str] = []
 
-    # Adaptive: proses seed paling produktif duluan (highest last_yield first)
+    # Adaptive: fresh seeds first, then most productive. Previously stale old
+    # seeds could consume the whole cycle before newly-added fallback NFT seeds
+    # got meaningful surface area.
     sorted_seeds = sorted(
         ct_seeds,
-        key=lambda h: seeds_state.get(h.lower(), {}).get("last_yield", 0),
-        reverse=True,
+        key=lambda h: (0 if h.lower() not in seeds_state else 1, -seeds_state.get(h.lower(), {}).get("last_yield", 0), h.lower()),
     )
 
     for seed_handle in sorted_seeds:
@@ -652,9 +753,19 @@ def run_cycle(pool: SessionPool, ct_seeds: list[str], state: dict,
         current_ids = [str(u["id"]) for u in users]
         current_set = set(current_ids)
 
-        # Diff: hanya yang baru muncul sejak run terakhir
+        # Diff: hanya yang baru muncul sejak run terakhir.
+        # Safety valve: every 6h, re-scan the current snapshot because early parser/gate bugs
+        # may have buried good candidates in known_ids/rejected before the classifier was fixed.
         new_user_ids = current_set - known_ids
-        targets      = users if first_time else [u for u in users if str(u["id"]) in new_user_ids]
+        rescan_snapshot = False
+        try:
+            last_checked = seed_info.get("last_check")
+            if last_checked:
+                last_dt = datetime.datetime.fromisoformat(last_checked)
+                rescan_snapshot = (datetime.datetime.now() - last_dt).total_seconds() >= 6 * 3600
+        except Exception:
+            rescan_snapshot = False
+        targets      = users if (first_time or rescan_snapshot) else [u for u in users if str(u["id"]) in new_user_ids]
 
         # Yield untuk adaptive: 0 saat baseline (belum ada data real diff)
         new_yield = 0 if first_time else len(targets)
@@ -689,8 +800,9 @@ def run_cycle(pool: SessionPool, ct_seeds: list[str], state: dict,
                     new_seen.append(handle)
                 continue
 
-            # Gate 2: pernah di-reject → skip total
-            if handle in rejected_set:
+            # Gate 2: pernah di-reject → normally skip, but re-check NFT-looking accounts.
+            # This lets improved gates rescue false positives from older stricter runs.
+            if handle in rejected_set and not nft_recheck_candidate(user):
                 stats["skip_rejected"] += 1
                 continue
 
@@ -701,14 +813,15 @@ def run_cycle(pool: SessionPool, ct_seeds: list[str], state: dict,
                 # Silent reject — file dedup saja, tidak perlu masuk Notion manapun
                 stats["hard_reject" if label == "hard_reject" else "not_ct"] += 1
                 new_rejected.append(handle)
-                log.debug("    [%s] @%s", label.upper(), user["screen_name"])
+                log.info("  [%s] @%-20s followers=%s bio=%s", label.upper(), user["screen_name"], user.get("followers_count"), (user.get("description") or "")[:90].replace("\n", " "))
                 continue
 
             if label == "ct_only":
                 # CT tapi bukan NFT → reject Notion DB untuk review
                 stats["ct_only"] += 1
                 new_rejected.append(handle)
-                upsert_reject_notion(user, seed_handle, "ct_not_nft")
+                if upsert_reject_notion(user, seed_handle, "ct_not_nft"):
+                    stats["added_reject_db"] += 1
                 time.sleep(NOTION_SLEEP)
                 continue
 
@@ -780,7 +893,7 @@ def main():
     cycle = 0
     while True:
         cycle += 1
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = now_wib_label()
         log.info("=== CYCLE %d — %s%s ===",
                  cycle, now, " [BASELINE]" if is_first_run else "")
 
@@ -797,12 +910,24 @@ def main():
                  stats["added_notion"], stats["added_reject_db"],
                  stats["skip_seen"], stats["skip_rejected"],
                  stats["hard_reject"], stats["not_ct"], stats["ct_only"])
+        try:
+            Path("runtime/last_run_status.json").parent.mkdir(parents=True, exist_ok=True)
+            Path("runtime/last_run_status.json").write_text(json.dumps({
+                "last_run_wib": now_wib_label(),
+                "cycle": cycle,
+                "stats": stats,
+                "live_sessions": len(live),
+                "total_sessions": len(sessions),
+                "seed_count": len(ct_seeds),
+            }, indent=2), encoding="utf-8")
+        except Exception as e:
+            log.warning("failed to write last_run_status.json: %s", e)
 
         if not args.loop:
             break
 
-        next_run = datetime.datetime.now() + datetime.timedelta(minutes=args.interval)
-        log.info("Next check in %dm — sleeping until %s\n",
+        next_run = datetime.datetime.now(WIB) + datetime.timedelta(minutes=args.interval)
+        log.info("Next check in %dm — sleeping until %s WIB\n",
                  args.interval, next_run.strftime("%H:%M"))
         time.sleep(args.interval * 60)
 

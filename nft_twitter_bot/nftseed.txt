@@ -41,3 +41,20 @@ Trappwurld
 #    ATAU tambah langsung di BASE_CT_LIST di nft_sniper.py
 # 2. Jalankan: python nft_sniper.py
 # 3. Notion akan otomatis ter-update dengan following dari seed baru
+
+# Added 2026-05-25 live NFT fallback seeds from search mentions
+quipnetwork
+lacertianseth
+thebeaksart
+giraffies_nft
+kageneko_nft
+OgRats_
+R3ORDR
+unipixnft
+EfdotStudio
+loculus_xyz
+DAEMONSv4
+yugen_gg
+hollows_nft
+heyshellmates
+OriginalBlokyz

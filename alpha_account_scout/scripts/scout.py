@@ -599,10 +599,15 @@ def hydrate_search_user(u, tweet_id=None):
                 if u.get("followersCount") is not None:
                     return u
 
-    lookup = u.get("screenName") or u.get("restId") or u.get("id")
+    # xreach 0.3.3 `user <numeric rest_id>` currently hits Twitter's
+    # UserByRestId endpoint, which returns Cloudflare HTML/403 even with fresh
+    # query IDs. Do not spend the global user-lookup budget on numeric-only
+    # search payloads; only hydrate by screenName. The following endpoint already
+    # returns complete user objects after our local xreach parser patch.
+    lookup = u.get("screenName")
     if not lookup:
         return u
-    key = str(lookup)
+    key = str(lookup).lstrip("@")
     if key in FAILED_USER_LOOKUPS:
         return u
     if USER_LOOKUP_ATTEMPTS >= MAX_USER_LOOKUP_ATTEMPTS or USER_LOOKUP_FAILURES >= MAX_USER_LOOKUP_FAILURES:
@@ -1835,8 +1840,10 @@ def build_search_lanes(day_key):
     # Rotate lane order per run so all thesis areas get fair coverage.
     # Priority lanes always included; order is shuffled per day_key to avoid ARC-first bias.
     import hashlib
-    priority_lanes = ["arc_base", "tempo", "tao_subnet", "ai_general", "solana_plays"]
-    secondary_lanes = ["defi_infra", "depin_compute", "nft_gaming_web3", "payments_rwa", "ai_earn", "infra_market"]
+    # Keep TAO as a lane, but do not put it in the first preflight slice by
+    # default. Main Notion was becoming TAO-heavy; rotate broader theses first.
+    priority_lanes = ["arc_base", "tempo", "ai_general", "solana_plays", "defi_infra", "depin_compute"]
+    secondary_lanes = ["nft_gaming_web3", "payments_rwa", "ai_earn", "infra_market", "tao_subnet"]
     # Deterministic shuffle based on day_key so each run within same day is consistent
     # but different days get different order
     seed_val = int(hashlib.md5(str(day_key).encode()).hexdigest()[:8], 16)
@@ -2145,7 +2152,10 @@ def group_balanced_seed_order(seeds, group_map, preferred=None):
     # Keep Kevin's thesis lanes consistently visible. Older rotation could start
     # the run on CT/discovered/ungrouped lanes, and the Notion cap would fill
     # before AWP/Tempo/TAO/Mine got meaningful surface area.
-    fixed_head = [g for g in ["awp_focus", "ai_earn_focus", "tempo_focus", "tao_focus", "arc_focus"] if g in group_order]
+    # 2026-05-25 calibration: TAO/subnet was snowballing via auto-learned
+    # discovered_small -> TAO seeds and filling Main before other theses got
+    # surface area. Keep TAO active, but no longer pin it in the fixed head.
+    fixed_head = [g for g in ["awp_focus", "ai_earn_focus", "tempo_focus", "arc_focus", "prediction_market_focus", "ai_focus"] if g in group_order]
     floating_tail = [g for g in group_order if g not in fixed_head]
     if floating_tail:
         rotate_group_by = int(time.time() // 3600) % len(floating_tail)
@@ -2785,6 +2795,18 @@ def is_main_notion_candidate(cand):
         cand["reject_reason"] = "recent_personal_or_generic_profile"
         return False
 
+    # Hard guard for TAO personal/KOL/noise that made Main dirty again.
+    # TAO/subnet stays supported, but personal holdings/calls/owner-only accounts
+    # must go to Reject unless they are clearly a project/product/protocol.
+    tao_personal_noise = (
+        any(t in profile_blob for t in ["$tao", "#tao", "bittensor", "subnet", "tao"])
+        and any(t in profile_blob for t in ["i hold", "all in", "good calls", "owner of", "founder of @", "crypto twitter account", "meme survivor", "research logs", "testnet notes", "music and technology nerd"])
+        and not any(t in profile_blob for t in ["protocol", "platform", "network", "app", "tooling", "dashboard", "infrastructure", "service layer", "training", "evaluation", "miner and validator tooling", "stablecoin", "market", "prediction", "settlement"])
+    )
+    if tao_personal_noise:
+        cand["reject_reason"] = "tao_personal_noise_not_project"
+        return False
+
     precision_score, precision_reasons = pre_accept_quality_score(profile_blob, source_seed)
     # Calibrated precision layer: project/builder accounts only.
     # Following sources need higher bar (lots of noise); search is pre-filtered by thesis keywords.
@@ -2802,7 +2824,19 @@ def is_main_notion_candidate(cand):
         min_precision_score = 0
     if playable_score >= 8:
         min_precision_score = min(min_precision_score, 1)
-    if precision_score < min_precision_score:
+    # Obvious crypto-project rescue before precision reject. These were showing up
+    # as false positives in Reject DB: Bittensor subnet builders, onchain infra,
+    # protocol/tooling accounts with very low followers.
+    obvious_project_rescue = (
+        bool(re.search(r"\bsn\s*\d+\b|bittensor\s+sn\s*\d+|subnet\s*\d+|tensorusd|opentensor|dtao", profile_blob))
+        or any(p in profile_blob for p in [
+            "bittensor ecosystem", "building on bittensor", "native stablecoin layer",
+            "blockchain cap table", "institutional-grade infrastructure", "onchain economy",
+            "protocol engineering", "dev updates", "sdk", "tooling", "developers",
+            "data-driven storytelling for the onchain economy", "onchain analytics",
+        ])
+    )
+    if precision_score < min_precision_score and not obvious_project_rescue:
         cand["reject_reason"] = "precision_gate_reject"
         cand["precision_score"] = precision_score
         cand["precision_reasons"] = precision_reasons[:6]
@@ -2812,8 +2846,13 @@ def is_main_notion_candidate(cand):
     projectish_score = projectish_signal_score(profile_blob)
     individual_score = individual_noise_score(profile_blob)
     smart_followers = int(cand.get("smart_followers") or 0)
-    # Strict: reject personal/trader/learner profiles unless clearly a project
-    if individual_score >= 1 and projectish_score < 2 and smart_followers < 4 and not urgent_following:
+    if obvious_project_rescue and projectish_score >= 2 and individual_score <= 1 and neg_bias < 2:
+        cand["accept_reason"] = "obvious_crypto_project_rescue"
+        return True
+    # Strict: reject personal/trader/learner profiles unless clearly a project.
+    # Bittensor/infra builders can mention founder/builder/designer but still be
+    # project-relevant; let the rescue signals above pass them.
+    if individual_score >= 1 and projectish_score < 2 and smart_followers < 4 and not urgent_following and not obvious_project_rescue:
         cand["reject_reason"] = "individual_profile_not_project"
         return False
     if individual_score >= 2 and projectish_score < 3 and smart_followers < 6 and not urgent_following:
